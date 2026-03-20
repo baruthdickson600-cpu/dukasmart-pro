@@ -2,7 +2,6 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const { Pool } = require('pg');
-const bcrypt = require('bcrypt');
 
 const app = express();
 app.use(cors());
