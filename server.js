@@ -1,162 +1,107 @@
-// DukaSmart_Pro_SingleFile.js
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = 'dukasmart_secret_key';
-const PORT = process.env.PORT || 5000;
-
-// --- Database connection ---
-const pool = new Pool({
-    user: process.env.DB_USER || 'postgres',
-    host: process.env.DB_HOST || 'localhost',
-    database: process.env.DB_NAME || 'dukasmart',
-    password: process.env.DB_PASSWORD || 'password',
-    port: process.env.DB_PORT || 5432,
-});
-
-// --- Express App ---
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// --- Middleware for auth ---
-function authMiddleware(allowedRoles = []) {
-    return (req, res, next) => {
-        const authHeader = req.headers['authorization'];
-        if (!authHeader) return res.sendStatus(401);
-        const token = authHeader.split(' ')[1];
-        jwt.verify(token, JWT_SECRET, (err, user) => {
-            if (err) return res.sendStatus(403);
-            if (allowedRoles.length && !allowedRoles.includes(user.role)) return res.sendStatus(403);
-            req.user = user;
-            next();
-        });
-    };
+// ===== DATABASE =====
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// ===== ROOT =====
+app.get("/", (req, res) => {
+  res.send("DukaSmart Pro API is running...");
+});
+
+// ===== CREATE TABLES =====
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      name TEXT,
+      phone TEXT UNIQUE,
+      password TEXT,
+      role TEXT
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS products (
+      id SERIAL PRIMARY KEY,
+      name TEXT,
+      category TEXT,
+      buying_price INT,
+      selling_price INT,
+      stock INT
+    );
+  `);
 }
 
-// --- Routes ---
+// ===== REGISTER =====
+app.post("/api/register", async (req, res) => {
+  const { name, phone, password, role } = req.body;
+  const hash = await bcrypt.hash(password, 10);
 
-// Register
-app.post('/api/auth/register', async (req, res) => {
-    const { name, phone, password, role, shop_id } = req.body;
-    try {
-        const hashedPassword = await bcrypt.hash(password, 10);
-        const result = await pool.query(
-            'INSERT INTO users (name, phone, password, role, shop_id) VALUES ($1,$2,$3,$4,$5) RETURNING id,name,role',
-            [name, phone, hashedPassword, role, shop_id]
-        );
-        res.json({ user: result.rows[0] });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+  await pool.query(
+    "INSERT INTO users(name, phone, password, role) VALUES($1,$2,$3,$4)",
+    [name, phone, hash, role]
+  );
+
+  res.json({ message: "User created" });
 });
 
-// Login
-app.post('/api/auth/login', async (req, res) => {
-    const { phone, password } = req.body;
-    try {
-        const userResult = await pool.query('SELECT * FROM users WHERE phone=$1', [phone]);
-        const user = userResult.rows[0];
-        if (!user) return res.status(400).json({ message: 'User not found' });
+// ===== LOGIN =====
+app.post("/api/login", async (req, res) => {
+  const { phone, password } = req.body;
 
-        const match = await bcrypt.compare(password, user.password);
-        if (!match) return res.status(400).json({ message: 'Password si sahihi' });
+  const result = await pool.query(
+    "SELECT * FROM users WHERE phone=$1",
+    [phone]
+  );
 
-        const token = jwt.sign({ id: user.id, role: user.role, shop_id: user.shop_id }, JWT_SECRET);
-        res.json({ token, user: { id: user.id, name: user.name, role: user.role } });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+  if (result.rows.length === 0) {
+    return res.status(400).json({ error: "User not found" });
+  }
+
+  const user = result.rows[0];
+  const match = await bcrypt.compare(password, user.password);
+
+  if (!match) {
+    return res.status(400).json({ error: "Wrong password" });
+  }
+
+  res.json({ message: "Login successful", user });
 });
 
-// Get Products
-app.get('/api/products', authMiddleware(['admin','owner','cashier']), async (req,res)=>{
-    try{
-        let query = 'SELECT * FROM products';
-        const values = [];
-        if(req.user.role==='owner' || req.user.role==='cashier'){
-            query += ' WHERE shop_id=$1';
-            values.push(req.user.shop_id);
-        }
-        const result = await pool.query(query, values);
-        res.json(result.rows);
-    }catch(err){
-        res.status(500).json({error: err.message});
-    }
+// ===== ADD PRODUCT =====
+app.post("/api/products", async (req, res) => {
+  const { name, category, buying_price, selling_price, stock } = req.body;
+
+  await pool.query(
+    "INSERT INTO products(name, category, buying_price, selling_price, stock) VALUES($1,$2,$3,$4,$5)",
+    [name, category, buying_price, selling_price, stock]
+  );
+
+  res.json({ message: "Product added" });
 });
 
-// Create Product (Owner Only)
-app.post('/api/products', authMiddleware(['owner']), async (req,res)=>{
-    const { name, category, buying_price, selling_price, stock, expiry_date, barcode } = req.body;
-    try{
-        const result = await pool.query(
-            `INSERT INTO products (shop_id,name,category,buying_price,selling_price,stock,expiry_date,barcode)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-            [req.user.shop_id,name,category,buying_price,selling_price,stock,expiry_date,barcode]
-        );
-        res.json(result.rows[0]);
-    }catch(err){
-        res.status(500).json({error: err.message});
-    }
+// ===== GET PRODUCTS =====
+app.get("/api/products", async (req, res) => {
+  const result = await pool.query("SELECT * FROM products");
+  res.json(result.rows);
 });
 
-// --- Seed Data ---
-async function seed(){
-    try{
-        await pool.query(`
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            name TEXT,
-            phone TEXT UNIQUE,
-            password TEXT,
-            role TEXT,
-            shop_id INT
-        );
-        CREATE TABLE IF NOT EXISTS shops (
-            id SERIAL PRIMARY KEY,
-            name TEXT,
-            location TEXT
-        );
-        CREATE TABLE IF NOT EXISTS products (
-            id SERIAL PRIMARY KEY,
-            shop_id INT,
-            name TEXT,
-            category TEXT,
-            buying_price INT,
-            selling_price INT,
-            stock INT,
-            expiry_date DATE,
-            barcode TEXT
-        );
-        `);
+// ===== START SERVER =====
+const PORT = process.env.PORT || 5000;
 
-        const adminPass = await bcrypt.hash('admin123',10);
-        const ownerPass = await bcrypt.hash('owner123',10);
-        const cashierPass = await bcrypt.hash('cashier123',10);
-
-        await pool.query(`INSERT INTO users (name, phone, password, role) VALUES
-            ('Admin','admin1','${adminPass}','admin'),
-            ('Owner','owner1','${ownerPass}','owner'),
-            ('Cashier','cashier1','${cashierPass}','cashier')
-        `);
-
-        await pool.query(`INSERT INTO shops (name, location) VALUES ('Duka A','Mwanza')`);
-
-        await pool.query(`INSERT INTO products (shop_id,name,category,buying_price,selling_price,stock)
-            VALUES (1,'Panadol','Dawa',500,800,50),
-                   (1,'Soda','Vinywaji',200,400,100),
-                   (1,'Sugar','Chakula',1000,1500,30)
-        `);
-
-        console.log('Seed data imeingia!');
-    }catch(err){
-        console.error(err);
-    }
-}
-
-// Run seed then start server
-seed().then(()=>app.listen(PORT,()=>console.log(`DukaSmart Pro running on port ${PORT}`)));
+initDB().then(() => {
+  app.listen(PORT, () => {
+    console.log(`DukaSmart running on port ${PORT}`);
+  });
+});
