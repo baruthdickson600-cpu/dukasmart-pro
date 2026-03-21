@@ -104,3 +104,4 @@ initDB().then(() => {
     console.log(`DukaSmart running on port ${PORT}`);
   });
 });
+//update
